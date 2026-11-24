@@ -3,6 +3,9 @@ package main
 import (
 	"fmt"
 	"time"
+
+	"github.com/jaxxstorm/dnsscale/providers"
+	"github.com/miekg/dns"
 )
 
 // Config represents the application configuration
@@ -28,12 +31,13 @@ type TailscaleConfig struct {
 
 // DNSConfig holds DNS provider configuration
 type DNSConfig struct {
-	Provider   string           `mapstructure:"provider" yaml:"provider"`
-	Domain     string           `mapstructure:"domain" yaml:"domain"`
-	ZoneID     string           `mapstructure:"zone_id" yaml:"zone_id,omitempty"`
-	Route53    Route53Config    `mapstructure:"route53" yaml:"route53,omitempty"`
-	Cloudflare CloudflareConfig `mapstructure:"cloudflare" yaml:"cloudflare,omitempty"`
-	Pihole     PiholeConfig     `mapstructure:"pihole" yaml:"pihole,omitempty"`
+	Provider   string                  `mapstructure:"provider" yaml:"provider"`
+	Domain     string                  `mapstructure:"domain" yaml:"domain"`
+	ZoneID     string                  `mapstructure:"zone_id" yaml:"zone_id,omitempty"`
+	Route53    Route53Config           `mapstructure:"route53" yaml:"route53,omitempty"`
+	Cloudflare CloudflareConfig        `mapstructure:"cloudflare" yaml:"cloudflare,omitempty"`
+	Pihole     PiholeConfig            `mapstructure:"pihole" yaml:"pihole,omitempty"`
+	RFC2136    providers.RFC2136Config `mapstructure:"rfc2136" yaml:"rfc2136,omitempty"`
 }
 
 // Route53Config holds AWS Route53 specific configuration
@@ -107,8 +111,18 @@ func (c *Config) Validate() error {
 		if c.DNS.Pihole.APIToken == "" {
 			return fmt.Errorf("dns.pihole.api_token is required when using pihole provider")
 		}
+	case "rfc2136":
+		if c.DNS.RFC2136.Zone == "" {
+			c.DNS.RFC2136.Zone = c.DNS.Domain
+		}
+		if _, err := providers.NewRFC2136Provider(c.DNS.RFC2136); err != nil {
+			return err
+		}
+		if _, ok := dns.IsDomainName(c.DNS.Domain); !ok || !dns.IsSubDomain(dns.Fqdn(c.DNS.RFC2136.Zone), dns.Fqdn(c.DNS.Domain)) {
+			return fmt.Errorf("dns.domain must be within dns.rfc2136.zone")
+		}
 	default:
-		return fmt.Errorf("unsupported dns provider: %s (supported: route53, cloudflare, pihole)", c.DNS.Provider)
+		return fmt.Errorf("unsupported dns provider: %s (supported: route53, cloudflare, pihole, rfc2136)", c.DNS.Provider)
 	}
 
 	// Validate app configuration
