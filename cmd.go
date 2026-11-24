@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -21,7 +22,7 @@ var rootCmd = &cobra.Command{
 	Long: `dnsscale is a tool that monitors your Tailscale network and automatically
 creates and manages DNS records for your nodes in your chosen DNS provider.
 
-It supports multiple DNS providers including AWS Route53 and Cloudflare,
+It supports AWS Route53, Cloudflare, Pi-hole, and RFC 2136 DNS providers,
 and can filter nodes based on tags to only manage specific machines.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runDNSScale(&config)
@@ -47,9 +48,9 @@ func init() {
 	rootCmd.PersistentFlags().String("tailscale-tailnet", "", "Tailscale tailnet name")
 
 	// DNS flags
-	rootCmd.PersistentFlags().String("dns-provider", "", "DNS provider (route53, cloudflare, or pihole)")
+	rootCmd.PersistentFlags().String("dns-provider", "", "DNS provider (route53, cloudflare, pihole, or rfc2136)")
 	rootCmd.PersistentFlags().String("dns-domain", "", "DNS domain to manage")
-	rootCmd.PersistentFlags().String("dns-zone-id", "", "DNS zone ID (not required for pihole)")
+	rootCmd.PersistentFlags().String("dns-zone-id", "", "DNS zone ID (required for route53 and cloudflare)")
 
 	// Provider-specific flags
 	rootCmd.PersistentFlags().String("cloudflare-api-token", "", "Cloudflare API token")
@@ -57,6 +58,12 @@ func init() {
 	rootCmd.PersistentFlags().String("route53-region", "", "AWS region")
 	rootCmd.PersistentFlags().String("pihole-base-url", "", "Pi-hole base URL (e.g., http://192.168.1.100)")
 	rootCmd.PersistentFlags().String("pihole-api-token", "", "Pi-hole API token")
+	rootCmd.PersistentFlags().String("rfc2136-server", "", "RFC 2136 server (host:port)")
+	rootCmd.PersistentFlags().String("rfc2136-zone", "", "RFC 2136 authoritative zone (defaults to dns-domain)")
+	rootCmd.PersistentFlags().String("rfc2136-tsig-key-name", "", "TSIG key name")
+	rootCmd.PersistentFlags().String("rfc2136-tsig-secret", "", "Base64-encoded TSIG secret")
+	rootCmd.PersistentFlags().String("rfc2136-tsig-algorithm", "", "TSIG algorithm (default hmac-sha256)")
+	rootCmd.PersistentFlags().Duration("rfc2136-timeout", 0, "DNS operation timeout (default 10s)")
 
 	// App flags
 	rootCmd.PersistentFlags().Int("workers", 2, "Number of worker goroutines")
@@ -78,6 +85,11 @@ func init() {
 	viper.BindPFlag("dns.route53.region", rootCmd.PersistentFlags().Lookup("route53-region"))
 	viper.BindPFlag("dns.pihole.base_url", rootCmd.PersistentFlags().Lookup("pihole-base-url"))
 	viper.BindPFlag("dns.pihole.api_token", rootCmd.PersistentFlags().Lookup("pihole-api-token"))
+	for _, key := range []string{"server", "zone", "tsig_key_name", "tsig_secret", "tsig_algorithm", "timeout"} {
+		flag := "rfc2136-" + strings.ReplaceAll(key, "_", "-")
+		viper.BindPFlag("dns.rfc2136."+key, rootCmd.PersistentFlags().Lookup(flag))
+		viper.BindEnv("dns.rfc2136."+key, "RFC2136_"+strings.ToUpper(key))
+	}
 	viper.BindPFlag("app.workers", rootCmd.PersistentFlags().Lookup("workers"))
 	viper.BindPFlag("app.poll_interval", rootCmd.PersistentFlags().Lookup("poll-interval"))
 	viper.BindPFlag("app.required_tags", rootCmd.PersistentFlags().Lookup("required-tags"))
@@ -87,6 +99,7 @@ func init() {
 	// Bind environment variables
 	viper.BindEnv("tailscale.api_key", "TAILSCALE_API_KEY")
 	viper.BindEnv("tailscale.tailnet", "TAILSCALE_TAILNET")
+	viper.BindEnv("dns.provider", "DNS_PROVIDER")
 	viper.BindEnv("dns.zone_id", "DNS_ZONE_ID")
 	viper.BindEnv("dns.domain", "DNS_DOMAIN")
 	viper.BindEnv("dns.cloudflare.api_token", "CLOUDFLARE_API_TOKEN")
@@ -167,11 +180,11 @@ tailscale:
   tailnet: "example@gmail.com"
 
 dns:
-  # DNS provider: route53, cloudflare, or pihole
+  # DNS provider: route53, cloudflare, pihole, or rfc2136
   provider: "cloudflare"
   # The domain to manage DNS records for
   domain: "example.com"
-  # The zone ID from your DNS provider (not required for pihole)
+  # The zone ID from your DNS provider (required for route53 and cloudflare)
   zone_id: "abc123def456"
   
   # Cloudflare-specific configuration (only needed if provider is cloudflare)
@@ -192,6 +205,15 @@ dns:
     base_url: "http://192.168.1.100"
     # Pi-hole API token (get from Settings > API/Web interface > Show API token)
     api_token: "your-pihole-api-token"
+
+  # RFC 2136 configuration (requires TCP UPDATE and AXFR permissions)
+  rfc2136:
+    server: "192.0.2.53:53"
+    zone: "example.com" # Defaults to dns.domain
+    tsig_key_name: "dnsscale."
+    tsig_secret: "BASE64_ENCODED_SECRET"
+    tsig_algorithm: "hmac-sha256"
+    timeout: "10s"
 
 app:
   # Number of worker goroutines for processing DNS updates

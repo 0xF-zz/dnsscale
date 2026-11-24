@@ -5,7 +5,7 @@ DNSScale is a tool that automatically manages DNS records for your Tailscale net
 ## Features
 
 - **Automatic DNS Management**: Creates and updates DNS records for Tailscale devices
-- **Multiple DNS Providers**: Supports AWS Route53 and Cloudflare
+- **Multiple DNS Providers**: Supports AWS Route53, Cloudflare, Pi-hole, and RFC 2136 with TSIG
 - **Real-time Monitoring**: Polls Tailscale API for device changes and updates DNS accordingly
 - **Tag-based Filtering**: Optionally manage only devices with specific tags
 - **Ownership Tracking**: Creates TXT records to track which DNS records are managed by DNSScale
@@ -24,7 +24,41 @@ DNSScale is a tool that automatically manages DNS records for your Tailscale net
 - Supports AWS profiles and IAM roles
 - Requires hosted zone ID
 
+### RFC 2136
+- Uses TCP dynamic DNS updates, with optional TSIG authentication
+- Supports A, AAAA, and TXT records on compatible authoritative servers
+- Requires AXFR permission for record listing and cleanup
+
 ## Installation
+
+### Docker
+
+```bash
+docker build -t dnsscale .
+docker run -d --name dnsscale --restart unless-stopped \
+  --read-only --cap-drop ALL --security-opt no-new-privileges \
+  --mount type=bind,src="$(pwd)/dnsscale.yaml",dst=/app/dnsscale.yaml,readonly \
+  dnsscale --config /app/dnsscale.yaml
+```
+
+The image runs as a non-root user; make the mounted configuration readable by
+that user. No inbound ports or Tailscale daemon are needed: allow outbound HTTPS
+to the Tailscale API and your provider, or TCP to the RFC 2136 server.
+`docker stop dnsscale` sends SIGTERM for graceful shutdown.
+Do not bake API tokens or TSIG secrets into the image.
+
+For environment-only configuration, use `docker run --env-file /path/to/dnsscale.env dnsscale`.
+The file uses `KEY=value` entries (not shell `export` statements), for example:
+
+```dotenv
+TAILSCALE_API_KEY=your-api-key
+TAILSCALE_TAILNET=your-tailnet
+DNS_PROVIDER=rfc2136
+DNS_DOMAIN=example.com
+RFC2136_SERVER=192.0.2.53:53
+RFC2136_TSIG_KEY_NAME=dnsscale.
+RFC2136_TSIG_SECRET=your-base64-secret
+```
 
 ### From Source
 
@@ -125,9 +159,9 @@ export CLOUDFLARE_API_TOKEN="your-cloudflare-api-token"
 
 ### DNS Configuration
 
-- `dns.provider`: DNS provider (`route53` or `cloudflare`)
+- `dns.provider`: DNS provider (`route53`, `cloudflare`, `pihole`, or `rfc2136`); environment variable `DNS_PROVIDER`
 - `dns.domain`: Domain to manage DNS records for
-- `dns.zone_id`: DNS zone ID from your provider
+- `dns.zone_id`: DNS zone ID (required only for Route53 and Cloudflare)
 
 #### Cloudflare Specific
 
@@ -137,6 +171,57 @@ export CLOUDFLARE_API_TOKEN="your-cloudflare-api-token"
 
 - `dns.route53.profile`: AWS profile to use (optional)
 - `dns.route53.region`: AWS region (optional)
+
+#### RFC 2136 (BIND, Knot DNS, PowerDNS, and other compatible servers)
+
+```yaml
+dns:
+  provider: "rfc2136"
+  domain: "nodes.example.com"
+  rfc2136:
+    server: "192.0.2.53:53" # Use [2001:db8::53]:53 for IPv6
+    zone: "example.com" # Authoritative zone; defaults to dns.domain
+    tsig_key_name: "dnsscale."
+    tsig_secret: "YOUR_BASE64_ENCODED_SECRET"
+    tsig_algorithm: "hmac-sha256"
+    timeout: "10s"
+```
+
+Updates use TCP and support A, AAAA, and TXT records. Updating a record atomically
+replaces its name/type RRset; deleting removes the specified value only.
+Record listing uses AXFR of the authoritative zone, filtered to `dns.domain`,
+so the server must allow both dynamic updates and zone transfers from this
+client. AXFR is separate from RFC 2136: a server that only permits UPDATE can
+receive updates, but cleanup will fail explicitly without AXFR permission.
+
+TSIG signs updates and transfers. The key name, base64 secret, and algorithm must
+match the server configuration. Supported algorithms are `hmac-sha1`,
+`hmac-sha224`, `hmac-sha256` (default), `hmac-sha384`, and `hmac-sha512`, with or
+without a trailing dot. Prefer SHA-256 or stronger. Omit all TSIG fields only
+when the server explicitly allows unsigned requests, for example by source IP.
+TSIG authenticates traffic but does not encrypt it.
+
+Each option accepts a matching flag (`--rfc2136-server`, `--rfc2136-zone`,
+`--rfc2136-tsig-key-name`, `--rfc2136-tsig-secret`, `--rfc2136-tsig-algorithm`,
+`--rfc2136-timeout`) or environment variable (`RFC2136_SERVER`, `RFC2136_ZONE`,
+`RFC2136_TSIG_KEY_NAME`, `RFC2136_TSIG_SECRET`, `RFC2136_TSIG_ALGORITHM`,
+`RFC2136_TIMEOUT`). Avoid passing secrets as flags where process listings can
+expose them.
+
+For BIND, generate a key with `tsig-keygen -a hmac-sha256 dnsscale.`, include the
+generated key in the server configuration, and configure the authoritative zone:
+
+```bind
+zone "example.com" {
+    type primary;
+    file "/var/lib/bind/db.example.com";
+    update-policy { grant dnsscale. subdomain nodes.example.com. A AAAA TXT; };
+    allow-transfer { key dnsscale.; };
+};
+```
+
+The zone file and its directory must be writable by BIND for its dynamic-update
+journal. Copy the generated key's secret into the client configuration securely.
 
 ### Application Settings
 

@@ -3,11 +3,15 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/jaxxstorm/dnsscale/providers"
@@ -224,6 +228,7 @@ func (r *DNSReconciler) Run(ctx context.Context, workers int) error {
 
 	<-ctx.Done()
 	r.logger.Info("Shutting down reconciler")
+	r.queue.ShutDown()
 	wg.Wait()
 	return ctx.Err()
 }
@@ -496,6 +501,13 @@ func createDNSProvider(ctx context.Context, config *Config, logger *zap.Logger) 
 		}
 		logger.Info("Initializing Pi-hole DNS provider", zap.String("base_url", config.DNS.Pihole.BaseURL))
 		return providers.NewPiholeProvider(config.DNS.Pihole.BaseURL, config.DNS.Pihole.APIToken)
+	case "rfc2136":
+		rfcConfig := config.DNS.RFC2136
+		if rfcConfig.Zone == "" {
+			rfcConfig.Zone = config.DNS.Domain
+		}
+		logger.Info("Initializing RFC 2136 DNS provider", zap.String("server", rfcConfig.Server))
+		return providers.NewRFC2136Provider(rfcConfig)
 	default:
 		return nil, fmt.Errorf("unsupported DNS provider: %s", config.DNS.Provider)
 	}
@@ -517,7 +529,8 @@ func runDNSScale(config *Config) error {
 		zap.Duration("poll_interval", config.App.PollInterval),
 		zap.String("log_level", config.Logging.Level))
 
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	// Initialize Tailscale client
 	tsClient := NewTailscaleClient(config.Tailscale.APIKey, config.Tailscale.Tailnet, logger)
@@ -525,7 +538,7 @@ func runDNSScale(config *Config) error {
 	// Initialize DNS provider
 	dnsProvider, err := createDNSProvider(ctx, config, logger)
 	if err != nil {
-		logger.Fatal("Failed to initialize DNS provider", zap.Error(err))
+		return fmt.Errorf("failed to initialize DNS provider: %w", err)
 	}
 
 	// Create and run reconciler
@@ -537,8 +550,8 @@ func runDNSScale(config *Config) error {
 		logger.Info("Added required tag filter", zap.String("tag", tag))
 	}
 
-	if err := reconciler.Run(ctx, config.App.Workers); err != nil {
-		logger.Fatal("Reconciler failed", zap.Error(err))
+	if err := reconciler.Run(ctx, config.App.Workers); err != nil && !errors.Is(err, context.Canceled) {
+		return fmt.Errorf("reconciler failed: %w", err)
 	}
 
 	return nil

@@ -1,0 +1,10 @@
+.git
+.github
+dnsscale
+*.yaml
+*.yml
+.env
+.env.*
+*.key
+*.pem
+*_test.go
